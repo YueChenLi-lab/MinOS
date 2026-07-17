@@ -1,0 +1,6 @@
+[toolchain]
+profile = "minimal"
+# Match the toolchain preinstalled in zhouzhouyi/os-contest:20260510.
+channel = "nightly-2025-02-01"
+components = ["rust-src", "llvm-tools-preview", "rustfmt", "clippy"]
+targets = ["riscv64gc-unknown-none-elf"]

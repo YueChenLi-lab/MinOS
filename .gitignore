@@ -1,0 +1,10 @@
+**/target/
+**/build/
+**/dist/
+**/node_modules/
+local-validation/
+toolchains/
+*.img
+*.tar
+*.tgz
+
