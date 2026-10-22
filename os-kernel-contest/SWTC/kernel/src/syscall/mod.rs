@@ -142,7 +142,7 @@ use crate::{
     signal::{SigAction, SigSet},
     strace,
     timer::ffi::{ITimerval, TimeSpec, TimeVal, Tms},
-    utils::error::SyscallRet,
+    utils::error::{SyscallErr, SyscallRet},
 };
 
 macro_rules! sys_handler {
@@ -530,9 +530,8 @@ pub async fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallRet {
             )
         }
         _ => {
-            // panic!("Unsupported syscall_id: {}", syscall_id);
             error!("Unsupported syscall_id: {}", syscall_id);
-            Ok(0)
+            Err(SyscallErr::ENOSYS)
         }
     }
 }

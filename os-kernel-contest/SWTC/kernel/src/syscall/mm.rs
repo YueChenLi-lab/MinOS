@@ -292,7 +292,9 @@ const IPC_PRIVATE: usize = 0;
 pub fn sys_shmget(key: usize, len: usize, _shmflag: u32) -> SyscallRet {
     stack_trace!();
     if key != IPC_PRIVATE {
-        panic!("[sys_shmget] unsupported operation, key {:#X}", key);
+        // Named SysV shared-memory segments are not implemented yet.
+        // A userspace-supplied key must never bring down the kernel.
+        return Err(SyscallErr::ENOSYS);
     }
     Ok(SHARED_MEMORY_MANAGER.lock().alloc(key, len))
 }

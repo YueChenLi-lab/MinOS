@@ -25,6 +25,46 @@ use super::TimeVal;
 
 type Pid = usize;
 
+// Keep the bounded argv/envp decoding separate from the execve logic.
+// Each pointer SLOT is verified as a readable usize before dereferencing;
+// checking argv/envp as if it were one C string is not sufficient.
+const EXECVE_MAX_POINTERS: usize = 512;
+const EXECVE_MAX_ARG_BYTES: usize = 128 * 1024;
+
+fn read_execve_string_array(mut ptr: *const usize) -> Result<Vec<String>, SyscallErr> {
+    if ptr.is_null() {
+        return Ok(Vec::new());
+    }
+
+    let mut strings = Vec::new();
+    let mut total_bytes = 0usize;
+    for _ in 0..EXECVE_MAX_POINTERS {
+        UserCheck::new().check_readable_slice(
+            ptr as *const u8,
+            core::mem::size_of::<usize>(),
+        )?;
+        // This is a userspace pointer slot, not a C string.
+        let string_addr = unsafe { ptr.read_unaligned() };
+        if string_addr == 0 {
+            return Ok(strings);
+        }
+        UserCheck::new().check_c_str(string_addr as *const u8)?;
+        let string = c_str_to_string(string_addr as *const u8);
+        total_bytes = total_bytes
+            .checked_add(string.len() + 1)
+            .ok_or(SyscallErr::E2BIG)?;
+        if total_bytes > EXECVE_MAX_ARG_BYTES {
+            return Err(SyscallErr::E2BIG);
+        }
+        strings.push(string);
+        let next = (ptr as usize)
+            .checked_add(core::mem::size_of::<usize>())
+            .ok_or(SyscallErr::EFAULT)?;
+        ptr = next as *const usize;
+    }
+    Err(SyscallErr::E2BIG)
+}
+
 pub fn sys_exit(exit_code: i8) -> SyscallRet {
     stack_trace!();
     info!(
@@ -142,7 +182,8 @@ pub async fn sys_clone(
 ) -> SyscallRet {
     stack_trace!();
 
-    let clone_flags = CloneFlags::from_bits(flags.try_into().unwrap());
+    let flags = u32::try_from(flags).map_err(|_| SyscallErr::EINVAL)?;
+    let clone_flags = CloneFlags::from_bits(flags);
 
     if clone_flags.is_none() {
         warn!("Invalid clone flags {}", flags);
@@ -202,7 +243,7 @@ pub async fn sys_clone(
     }
 }
 
-pub fn sys_execve(path: *const u8, mut args: *const usize, mut envs: *const usize) -> SyscallRet {
+pub fn sys_execve(path: *const u8, args: *const usize, envs: *const usize) -> SyscallRet {
     stack_trace!();
 
     info!(
@@ -230,36 +271,8 @@ pub fn sys_execve(path: *const u8, mut args: *const usize, mut envs: *const usiz
         args_vec.push("busybox".to_string());
     }
 
-    UserCheck::new().check_c_str(args as *const u8)?;
-    loop {
-        if unsafe { *args == 0 } {
-            break;
-        }
-        //// TODO: add user check
-        UserCheck::new().check_c_str(unsafe { (*args) as *const u8 })?;
-        args_vec.push(c_str_to_string(unsafe { (*args) as *const u8 }));
-        debug!("exec get an arg {}", args_vec[args_vec.len() - 1]);
-        unsafe {
-            args = args.add(1);
-        }
-    }
-
-    let mut envs_vec: Vec<String> = Vec::new();
-    if !envs.is_null() {
-        UserCheck::new().check_c_str(envs as *const u8)?;
-        loop {
-            if unsafe { *envs == 0 } {
-                break;
-            }
-            //// TODO: add user check
-            UserCheck::new().check_c_str(unsafe { (*envs) as *const u8 })?;
-            envs_vec.push(c_str_to_string(unsafe { (*envs) as *const u8 }));
-            debug!("exec get an env {}", envs_vec[envs_vec.len() - 1]);
-            unsafe {
-                envs = envs.add(1);
-            }
-        }
-    }
+    args_vec.extend(read_execve_string_array(args)?);
+    let mut envs_vec = read_execve_string_array(envs)?;
 
     let cwd = current_process().inner_handler(|process| process.cwd.clone());
     envs_vec.push(alloc::format!(
