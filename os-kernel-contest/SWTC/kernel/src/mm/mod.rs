@@ -37,6 +37,7 @@ pub use page::{Page, PageBuilder};
 pub use allocator::recycle_allocator::RecycleAllocator;
 pub use page_table::PageTable;
 pub use page_table::PageTableEntry;
+pub use page_table::PTEFlags;
 
 use crate::processor::hart::HARTS;
 

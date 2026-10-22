@@ -8,7 +8,7 @@ use crate::{
             vm_area::{BackupFile, VmAreaType},
             PageFaultHandler,
         },
-        MapPermission, VPNRange, VirtAddr, SHARED_MEMORY_MANAGER,
+        MapPermission, PTEFlags, VPNRange, VirtAddr, SHARED_MEMORY_MANAGER,
     },
     processor::current_process,
     stack_trace,
@@ -164,29 +164,61 @@ pub fn sys_mprotect(addr: usize, len: usize, prot: i32) -> SyscallRet {
         return Err(SyscallErr::EINVAL);
     }
 
-    let _prot = MmapProt::from_bits(prot as u32).ok_or(SyscallErr::EINVAL)?;
-
-    // TODO: just give all permissions here
-    let prot = MmapProt::all();
-
-    let map_permission: MapPermission = prot.into();
-    debug!(
-        "[sys_mprotect]: addr {:#x} len {:#x}, prot {:?}",
-        addr, len, prot
-    );
-    if prot == MmapProt::PROT_NONE {
-        log::warn!("[sys_mprotect] PROT_NONE, ignore");
-        return Ok(0);
+    let prot = MmapProt::from_bits(prot as u32).ok_or(SyscallErr::EINVAL)?;
+    if len == 0 {
+        return Err(SyscallErr::EINVAL);
     }
+    let end = addr.checked_add(len).ok_or(SyscallErr::ENOMEM)?;
+    // RISC-V Sv39 disallows a write-only leaf PTE (W=1, R=0).
+    // Preserve Linux PROT_WRITE semantics by enabling read on hardware.
+    let mut map_permission: MapPermission = prot.into();
+    if map_permission.contains(MapPermission::W) {
+        map_permission |= MapPermission::R;
+    }
+    debug!("[sys_mprotect]: addr {:#x} len {:#x}, prot {:?}", addr, len, prot);
     current_process().inner_handler(|proc| {
+        let start_vpn = VirtAddr::from(addr).floor();
+        let end_vpn = VirtAddr::from(end).ceil();
+        // Splitting an existing VMA would require redistributing owned frames,
+        // file offsets, and COW bookkeeping. Until implemented, reject partial
+        // protection changes rather than silently widening or misapplying them.
         let vma = proc
             .memory_space
-            .find_vm_area_mut_by_vpn(VirtAddr::from(addr).floor())
-            .ok_or(SyscallErr::EINVAL)?;
-        vma.map_perm = map_permission;
-        Ok(())
-    })?;
-    Ok(0)
+            .find_vm_area_mut_by_vpn(start_vpn)
+            .ok_or(SyscallErr::ENOMEM)?;
+        if vma.start_vpn() != start_vpn || vma.end_vpn() != end_vpn {
+            return Err(SyscallErr::ENOSYS);
+        }
+        // PROT_NONE is represented by a supervisor-only leaf: the user U bit
+        // is clear. This avoids generating an invalid W-only or V-only leaf.
+        let user_perm = if prot == MmapProt::PROT_NONE {
+            MapPermission::empty()
+        } else {
+            map_permission | MapPermission::U
+        };
+        let page_table = vma.page_table.clone();
+        // Update all populated PTEs as well as the VMA used by future faults.
+        // Retain COW write protection until the COW fault path resolves it.
+        for vpn in vma.vpn_range {
+            if let Some(pte) = page_table.get_unchecked_mut().find_pte(vpn) {
+                let old = pte.flags();
+                let mut flags = old & !(PTEFlags::R | PTEFlags::W | PTEFlags::X | PTEFlags::U);
+                if prot == MmapProt::PROT_NONE {
+                    // A valid supervisor-only leaf must retain a leaf bit.
+                    flags |= PTEFlags::R;
+                } else {
+                    flags |= PTEFlags::from(user_perm);
+                    if old.contains(PTEFlags::COW) {
+                        flags.remove(PTEFlags::W);
+                    }
+                }
+                pte.set_flags(flags);
+            }
+        }
+        vma.map_perm = user_perm;
+        page_table.get_unchecked_mut().activate();
+        Ok(0)
+    })
 }
 
 pub fn sys_msync(addr: usize, len: usize, flags: i32) -> SyscallRet {

@@ -123,7 +123,17 @@ impl PageFaultHandler for SBrkPageFaultHandler {
         //     warn!("[sbrk page fault handler]: already exist phyiscal frame {:#x} for va {:#x}, pte flags {:?}", ppn.0, va.0, page_table.find_pte(va.floor()).unwrap().flags());
         // }
         data_frames.0.insert(vpn, Arc::new(page));
-        let pte_flags = PTEFlags::W | PTEFlags::R | PTEFlags::X | PTEFlags::U;
+        let map_perm = vma.as_ref().unwrap().map_perm;
+        // Match this VMA's requested permissions; don't give all
+        // lazily allocated anonymous pages unconditional RWX access.
+        let mut pte_flags = PTEFlags::from(map_perm);
+        if pte_flags.contains(PTEFlags::W) {
+            pte_flags |= PTEFlags::R;
+        }
+        if !pte_flags.intersects(PTEFlags::R | PTEFlags::W | PTEFlags::X) {
+            pte_flags |= PTEFlags::R;
+            pte_flags.remove(PTEFlags::U);
+        }
         page_table.map(vpn, ppn, pte_flags);
         page_table.activate();
         Ok(true)
